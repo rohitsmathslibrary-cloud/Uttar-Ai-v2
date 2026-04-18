@@ -1,0 +1,9 @@
+{
+  "name": "Lakshmi (Indian IB Math Tutor)",
+  "description": "A personalized AI math tutor for IB students. Integrates the IB Learner Profile and ATL skills with a warm Indian teaching persona, real-time voice interaction, and Gemini 3.0 reasoning.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
