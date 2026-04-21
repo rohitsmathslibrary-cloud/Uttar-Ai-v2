@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Roboto", ui-sans-serif, system-ui, sans-serif;
+  --font-chalk: "Patrick Hand", cursive;
+}
+
+@layer base {
+  body {
+    @apply bg-black text-stone-300 overflow-hidden;
+  }
+}
+
+@layer components {
+  .chalk-text {
+    text-shadow: 0px 0px 1px rgba(255,255,255,0.4);
+    filter: blur(0.2px) contrast(1.1);
+  }
+}
+
+@keyframes bounce-deep {
+  0%, 100% {
+    transform: translateY(-5px);
+    animation-timing-function: cubic-bezier(0.8, 0, 1, 1);
+  }
+  50% {
+    transform: translateY(0);
+    animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  }
+}
+
+.animate-bounce-deep {
+  animation: bounce-deep 1s infinite;
+}

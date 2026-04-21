@@ -2,6 +2,18 @@
 import { MODELS, SYSTEM_INSTRUCTION } from "../constants";
 import { callGeminiProxy } from "./geminiWebProxy";
 
+// Proxy - routes all Gemini calls through Firebase Cloud Function
+const PROXY_URL = 'https://geminiproxy-ljtntzc7pq-el.a.run.app';
+async function callProxy(model: string, body: object, referer: string): Promise<any> {
+  const response = await fetch(`${PROXY_URL}?model=${encodeURIComponent(model)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Referer': referer },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`Proxy error: ${response.status}`);
+  return response.json();
+}
+
 export const getEstimatedWaitTime = (taskType: 'math' | 'fast', prompt: string = ""): string => {
   if (taskType === 'math') return "~1-3 mins";
   return "~3-5 seconds";
