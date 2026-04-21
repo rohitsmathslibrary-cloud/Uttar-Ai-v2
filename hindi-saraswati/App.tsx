@@ -503,7 +503,7 @@ const App: React.FC<{onSwitchMode?: () => void}> = ({ onSwitchMode }) => {
       
       <Header 
         mode={mode} 
-        onToggleLive={() => setMode(mode === 'text' ? 'live' : 'text')} onSwitchMode={onSwitchMode} 
+        onToggleLive={() => setMode(mode === 'text' ? 'live' : 'text')} onSwitchMode={onSwitchMode} onSwitchMode={onSwitchMode} 
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
         onNewTopic={handleNewTopic} 
       />

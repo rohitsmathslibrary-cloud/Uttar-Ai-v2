@@ -311,7 +311,7 @@ const App: React.FC<{onSwitchMode?: () => void}> = ({ onSwitchMode }) => {
       
       <Header 
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
-        onNewTopic={handleNewTopic} 
+        onNewTopic={handleNewTopic} onSwitchMode={onSwitchMode} 
       onSwitchMode={onSwitchMode} />
       
       <Sidebar 

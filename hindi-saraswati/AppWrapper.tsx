@@ -91,11 +91,6 @@ export default function AppWrapper() {
     </div>
   );
   return (
-    <div>
-      {appMode==='quicksolve'
-        ? <AppQuick onSwitchMode={()=>setStage('select-mode')}/>
-        : <App onSwitchMode={()=>setStage('select-mode')}/>
-      }
-    </div>
+    <>{appMode==='quicksolve'?<AppQuick onSwitchMode={()=>setStage('select-mode')}/>:<App onSwitchMode={()=>setStage('select-mode')}/>}</>
   );
 }
