@@ -1,528 +1,551 @@
 
-
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Menu, PlusCircle } from 'lucide-react';
-import ChatInterface from './components/ChatInterface';
-import InputArea from './components/InputArea';
-import Sidebar from './components/Sidebar';
-import { AppState, Message, Role, MessageType } from './types';
-
-import { trackStudentPrompt, trackSessionStart, isMCQResponse } from './services/analyticsService';
-import { generateMathResponse, getTTSAudioBuffer, initAudioContext, getAudioContext, getEstimatedWaitTime } from './services/geminiServiceWeb';
-
-// Helper to generate IDs
-const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2);
+import React, { useState, useEffect, useRef } from 'react';
+import { Header } from './components/Header';
+import { Blackboard } from './components/Blackboard';
+import { InputBar } from './components/InputBar';
+import { Sidebar } from './components/Sidebar';
+import { LiveOverlay } from './components/LiveOverlay';
+import { Message, UserMode, HistoryItem } from './types';
+import { SaraswatiService } from './services/geminiServiceWeb';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import 'katex/dist/katex.min.css';
 
 const App: React.FC = () => {
-  // State
-  const [state, setState] = useState<AppState>({
-    messages: [],
-    isRecording: false,
-    isThinking: false,
-    isConnectedToLive: false,
-    inputMode: 'text',
-    notebook: [],
-    isAudioPlaying: false,
-    isAudioPaused: false,
-    currentlyPlayingMessageId: null, 
-    estimatedWaitTime: undefined
-  });
+  const [mode, setMode] = useState<UserMode>('text');
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [showKeySelector, setShowKeySelector] = useState(false);
+  const [history, setHistory] = useState<HistoryItem[]>([]); 
   
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [isSidebarOpen, setSidebarOpen] = useState(false);
-  const [liveManager, setLiveManager] = useState<LiveManager | null>(null);
-  const [isTTSActive, setIsTTSActive] = useState(true);
+  // Session Management
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() => Date.now().toString());
+
+  // MCQ State
+  const [activeMcqMessageId, setActiveMcqMessageId] = useState<string | null>(null);
+
+  // Audio Playback State
+  const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
+  const [playbackProgress, setPlaybackProgress] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
   
-  // Audio Refs
+  const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const activeRequestIdRef = useRef<string | null>(null);
-  // Changed NodeJS.Timeout to number as setTimeout in browser returns a number
-  const audioTimeoutRef = useRef<number | null>(null); 
-  
-  // Deduplication Ref (Critical for preventing 20 -> 2020 issue)
-  const lastProcessedMessageRef = useRef<{ content: string; timestamp: number } | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const animationFrameRef = useRef<number>(0);
+  const playingMessageIdRef = useRef<string | null>(null);
+  const pauseOffsetRef = useRef<number>(0);
+  const AUDIO_PLAYBACK_RATE = 0.95;
 
-  // Ref to hold the most current messages array (updated synchronously)
-  const latestMessagesRef = useRef<Message[]>();
-
-  // Update the ref whenever state.messages changes
-  useEffect(() => {
-    latestMessagesRef.current = state.messages;
-  }, [state.messages]);
-
-  // --- Persistence Logic ---
-  
-  useEffect(() => {
+  // Helper for safe localStorage saving
+  const safeSaveToLocalStorage = (key: string, data: any) => {
     try {
-      const savedNotebook = localStorage.getItem('uttar_ai_notebook');
-      if (savedNotebook) {
-        setState(prev => ({ ...prev, notebook: JSON.parse(savedNotebook) }));
-      }
-      handleNewNote(); 
+      localStorage.setItem(key, JSON.stringify(data));
     } catch (e) {
-      console.error("Failed to load notebook", e);
+      if (e instanceof Error && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED')) {
+        console.warn(`LocalStorage quota exceeded for key: ${key}. Attempting to prune...`);
+        
+        if (key.startsWith('saraswati_chat_') && Array.isArray(data)) {
+          // Prune images first
+          const prunedMessages = data.map((msg: any) => {
+            if (msg.image) {
+              const { image, ...rest } = msg;
+              return rest;
+            }
+            return msg;
+          });
+          
+          try {
+            localStorage.setItem(key, JSON.stringify(prunedMessages));
+            return;
+          } catch (e2) {
+            // Still failing? Keep only last 15 messages
+            const limitedMessages = prunedMessages.slice(-15);
+            try {
+              localStorage.setItem(key, JSON.stringify(limitedMessages));
+              return;
+            } catch (e3) {
+              console.error("Failed to save even after pruning and limiting messages", e3);
+            }
+          }
+        }
+        
+        if (key === 'saraswati_history' && Array.isArray(data)) {
+           // Keep only 15 most recent sessions in history
+           const limitedHistory = data.slice(0, 15);
+           try {
+             localStorage.setItem(key, JSON.stringify(limitedHistory));
+             return;
+           } catch (e4) {
+             console.error("Failed to save history even after limiting", e4);
+           }
+        }
+      } else {
+        console.error("LocalStorage error", e);
+      }
+    }
+  };
+
+  // Check for API Key on mount & Load History
+  useEffect(() => {
+    const checkApiKey = async () => {
+      if (window.aistudio) {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+          setShowKeySelector(true);
+        }
+      }
+    };
+    checkApiKey();
+
+    // Load History from LocalStorage
+    const savedHistory = localStorage.getItem('saraswati_history');
+    if (savedHistory) {
+        try {
+            setHistory(JSON.parse(savedHistory));
+        } catch (e) {
+            console.error("Failed to parse history", e);
+        }
     }
   }, []);
 
+  // Save Messages to LocalStorage whenever they change
   useEffect(() => {
-    if (!currentSessionId || state.messages.length === 0) return;
-
-    const sessionKey = `uttar_ai_session_${currentSessionId}`;
-    localStorage.setItem(sessionKey, JSON.stringify(state.messages));
-
-    const title = state.messages[0].content.slice(0, 30) + (state.messages[0].content.length > 30 ? '...' : '');
-    const date = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-
-    setState(prev => {
-      const existingEntryIndex = prev.notebook.findIndex(n => n.id === currentSessionId);
-      let updatedNotebook;
-      if (existingEntryIndex >= 0) {
-        updatedNotebook = [...prev.notebook];
-        updatedNotebook[existingEntryIndex] = { ...updatedNotebook[existingEntryIndex], title, summary: title };
-      } else {
-        // This path should ideally not be taken if currentSessionId exists and has messages,
-        // but ensures the notebook entry is created if somehow missing.
-        updatedNotebook = [{ id: currentSessionId, title, date, summary: title }, ...prev.notebook];
-      }
-      localStorage.setItem('uttar_ai_notebook', JSON.stringify(updatedNotebook));
-      return { ...prev, notebook: updatedNotebook };
-    });
-  }, [state.messages, currentSessionId]);
-
-  const stopAudio = () => {
-    if (audioSourceRef.current) {
-      try { audioSourceRef.current.stop(); } catch (e) { console.warn("Error stopping audio source:", e); }
-      audioSourceRef.current = null;
+    if (currentSessionId && messages.length > 0) {
+        safeSaveToLocalStorage(`saraswati_chat_${currentSessionId}`, messages);
     }
-    if (audioTimeoutRef.current) { // Clear safety timeout if audio is stopped manually
-        clearTimeout(audioTimeoutRef.current);
-        audioTimeoutRef.current = null;
-    }
-    const ctx = getAudioContext();
-    if (ctx && ctx.state === 'running') {
-        try { ctx.suspend(); } catch (e) { console.warn("Error suspending audio context:", e); }
-    }
-    setState(prev => ({ ...prev, isAudioPlaying: false, isAudioPaused: false, currentlyPlayingMessageId: null }));
-  };
+  }, [messages, currentSessionId]);
 
-  const togglePauseAudio = () => {
-    const ctx = getAudioContext();
-    if (!ctx) {
-        console.warn("AudioContext not initialized.");
-        return;
-    }
-
-    if (state.isAudioPaused) {
-      try { ctx.resume(); } catch (e) { console.error("Error resuming audio context:", e); return; }
-      setState(prev => ({ ...prev, isAudioPaused: false }));
-    } else {
-      try { ctx.suspend(); } catch (e) { console.error("Error suspending audio context:", e); return; }
-      setState(prev => ({ ...prev, isAudioPaused: true }));
-    }
-  };
-
-  const handleNewNote = () => {
-    stopAudio();
-    activeRequestIdRef.current = null;
-    lastProcessedMessageRef.current = null; // Reset deduplication on new note
-
-    // Synchronously save the *current* session's messages before changing currentSessionId
-    if (currentSessionId && latestMessagesRef.current && latestMessagesRef.current.length > 0) {
-      const sessionKey = `uttar_ai_session_${currentSessionId}`;
-      localStorage.setItem(sessionKey, JSON.stringify(latestMessagesRef.current)); // Use ref for latest messages
-
-      // Update notebook entry title/summary for the session being closed
-      const title = latestMessagesRef.current[0].content.slice(0, 30) + (latestMessagesRef.current[0].content.length > 30 ? '...' : '');
-      const date = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-
-      setState(prev => {
-        const existingEntryIndex = prev.notebook.findIndex(n => n.id === currentSessionId);
-        let updatedNotebook;
-        if (existingEntryIndex >= 0) {
-          updatedNotebook = [...prev.notebook];
-          updatedNotebook[existingEntryIndex] = { ...updatedNotebook[existingEntryIndex], title, date, summary: title };
-        } else {
-          // This path should ideally not be taken if currentSessionId exists and has messages,
-          // but ensures the notebook entry is created if somehow missing.
-          updatedNotebook = [{ id: currentSessionId, title, date, summary: title }, ...prev.notebook];
-        }
-        localStorage.setItem('uttar_ai_notebook', JSON.stringify(updatedNotebook));
-        return { ...prev, notebook: updatedNotebook };
-      });
-    }
-
-    const newId = generateId();
-    setCurrentSessionId(newId);
-    trackSessionStart(newId);
-    setState(prev => ({
-      ...prev,
-      messages: [], // Clear messages for the new session
-      isThinking: false,
-      isRecording: false,
-      isAudioPlaying: false,
-      isAudioPaused: false,
-      currentlyPlayingMessageId: null,
-      estimatedWaitTime: undefined
-    }));
-    setSidebarOpen(false);
-  };
-
-  const loadSession = (sessionId: string) => {
-    if (sessionId === currentSessionId) {
-      setSidebarOpen(false); // Already on this session, just close sidebar
-      return;
-    }
-
-    stopAudio();
-    activeRequestIdRef.current = null;
-    lastProcessedMessageRef.current = null; // Reset deduplication on load
-
-    // Synchronously save the *current* session's messages before loading a new one
-    if (currentSessionId && latestMessagesRef.current && latestMessagesRef.current.length > 0) {
-      const sessionKey = `uttar_ai_session_${currentSessionId}`;
-      localStorage.setItem(sessionKey, JSON.stringify(latestMessagesRef.current)); // Use ref for latest messages
-
-      // Update notebook entry title/summary for the session being closed
-      const title = latestMessagesRef.current[0].content.slice(0, 30) + (latestMessagesRef.current[0].content.length > 30 ? '...' : '');
-      const date = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-      setState(prev => {
-        const existingEntryIndex = prev.notebook.findIndex(n => n.id === currentSessionId);
-        let updatedNotebook;
-        if (existingEntryIndex >= 0) {
-          updatedNotebook = [...prev.notebook];
-          updatedNotebook[existingEntryIndex] = { ...updatedNotebook[existingEntryIndex], title, date, summary: title };
-        } else {
-          // This path should ideally not be taken if currentSessionId exists and has messages
-          updatedNotebook = [{ id: currentSessionId, title, date, summary: title }, ...prev.notebook];
-        }
-        localStorage.setItem('uttar_ai_notebook', JSON.stringify(updatedNotebook));
-        return { ...prev, notebook: updatedNotebook };
-      });
-    }
-
-    try {
-      const sessionData = localStorage.getItem(`uttar_ai_session_${sessionId}`);
-      if (sessionData) {
-        setCurrentSessionId(sessionId);
-        setState(prev => ({
-          ...prev,
-          messages: JSON.parse(sessionData),
-          isThinking: false,
-          isAudioPlaying: false,
-          currentlyPlayingMessageId: null
-        }));
-        setSidebarOpen(false);
-      } else {
-        console.warn(`Session data not found for ID: ${sessionId}, starting new empty session.`);
-        // If data is not found, it implies a new session will be effectively loaded,
-        // so ensure the currentSessionId is set, and messages are cleared.
-        setCurrentSessionId(sessionId); // Set to the requested ID, even if empty
-        setState(prev => ({
-          ...prev,
-          messages: [],
-          isThinking: false,
-          isAudioPlaying: false,
-          currentlyPlayingMessageId: null
-        }));
-        setSidebarOpen(false);
-      }
-    } catch (e) {
-      console.error("Failed to load session", e);
-      // Fallback: If loading fails, just clear to an empty new session
-      handleNewNote(); // This will create a completely fresh session.
-    }
-  };
-
-  const fileToDataURL = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = error => reject(error);
-    });
-  };
-
-  const handleSendMessage = async (text: string, image?: File) => {
-    // --- ROBUST DEDUPLICATION CHECK ---
-    const now = Date.now();
-    if (lastProcessedMessageRef.current && 
-        lastProcessedMessageRef.current.content === text && 
-        (now - lastProcessedMessageRef.current.timestamp < 2000)) {
-        console.warn("Duplicate message blocked by Ref check:", text);
-        return;
-    }
-    lastProcessedMessageRef.current = { content: text, timestamp: now };
-    // ----------------------------------
-
-    stopAudio();
-    const currentRequestId = generateId();
-    activeRequestIdRef.current = currentRequestId;
-    const ctx = initAudioContext(); // Ensure audio context is ready
-
-    let imageDataUrl: string | undefined = undefined;
-    if (image) {
-      try { imageDataUrl = await fileToDataURL(image); } catch (e) { }
-    }
-
-    // Track prompt
-    const lastAiMsg = state.messages.filter(m => m.role === Role.MODEL).slice(-1)[0];
-    const lastMCQOpts = lastAiMsg?.mcqOptions || [];
-    const isFromMCQ = isMCQResponse(text, lastMCQOpts);
-    if (currentSessionId && !isFromMCQ) trackStudentPrompt(text, currentSessionId, false);
-
-    const newMessage: Message = {
-      id: currentRequestId,
-      role: Role.USER,
-      type: imageDataUrl ? MessageType.IMAGE : MessageType.TEXT,
-      content: text,
-      timestamp: Date.now(),
-      imageData: imageDataUrl
-    };
-
-    const estimatedTime = getEstimatedWaitTime('math', text);
-
-    setState(prev => ({
-      ...prev,
-      messages: [...prev.messages, newMessage],
-      isThinking: true,
-      estimatedWaitTime: estimatedTime
-    }));
-
-    try {
-      // FIX: Use 'state.messages' (history BEFORE the new message) 
-      // AND handle image-only messages where 'content' might be empty string.
-      const history = state.messages.map(m => {
-        // Fallback text if content is empty (e.g. image message) to prevent API errors
-        const safeContent = m.content && m.content.trim().length > 0 
-            ? m.content 
-            : (m.imageData ? "[User sent an image]" : "...");
-        
-        return {
-          role: m.role,
-          parts: [{ text: safeContent }] 
-        };
-      });
-
-      let imagePart;
-      if (image && imageDataUrl) {
-        const base64Data = imageDataUrl.split(',')[1];
-        imagePart = { inlineData: { mimeType: image.type, data: base64Data } };
-      }
-
-      // Call Gemini
-      const { text: aiResponseText, groundingChunks } = await generateMathResponse(history, text, imagePart);
-      
-      if (activeRequestIdRef.current !== currentRequestId) return;
-
-      let finalContent = aiResponseText;
-      let mcqOptions: string[] | undefined;
-
-      // 1. ROBUST MCQ TAG PARSING
-      // Use Regex to find the START to handle spaces like "<< MCQ:" or "<<MCQ :"
-      // Use lastIndexOf for the END to handle nested brackets/content safely
-      const startMatch = finalContent.match(/<<\s*MCQ\s*:/i);
-      const startIdx = startMatch ? startMatch.index : -1;
-      const mcqEndTag = '>>';
-
-      if (startIdx !== -1 && startMatch) {
-          // Find the last occurrence of '>>' to capture the entire block
-          const endIdx = finalContent.lastIndexOf(mcqEndTag);
+  // Save History list to LocalStorage whenever it changes
+  useEffect(() => {
+      if (history.length > 0) {
+          safeSaveToLocalStorage('saraswati_history', history);
           
-          if (endIdx > startIdx) {
-              const rawJson = finalContent.substring(startIdx + startMatch[0].length, endIdx).trim();
-              const fullTagString = finalContent.substring(startIdx, endIdx + mcqEndTag.length);
-              
-              // IMMEDIATELY remove the tag from content so it is NOT visible in UI or read by TTS
-              finalContent = finalContent.replace(fullTagString, '').trim();
-
-              try {
-                  // Attempt Parse
-                  mcqOptions = JSON.parse(rawJson);
-                  
-                   // Malformed LaTeX check
-                  if (mcqOptions && Array.isArray(mcqOptions) && mcqOptions.some((o: string) => /[\u000C\t]/.test(o))) {
-                      throw new Error("Malformated LaTeX escapes detected");
-                  }
-              } catch (e) {
-                  console.warn("MCQ JSON parse failed, attempting sanitization...", e);
-                  try {
-                      // Sanitization Fallback
-                      const sanitized = rawJson
-                        .replace(/\\"/g, '___QUOTE___') 
-                        .replace(/\\/g, '\\\\') 
-                        .replace(/___QUOTE___/g, '\\"');
-                      mcqOptions = JSON.parse(sanitized);
-                  } catch (e2) {
-                      console.error("MCQ Sanitization failed completely", e2);
+          // Cleanup orphaned chat data to free up space
+          const historyIds = new Set(history.map(h => h.id));
+          const keysToRemove: string[] = [];
+          
+          for (let i = 0; i < localStorage.length; i++) {
+              const key = localStorage.key(i);
+              if (key && key.startsWith('saraswati_chat_')) {
+                  const id = key.replace('saraswati_chat_', '');
+                  if (!historyIds.has(id)) {
+                      keysToRemove.push(key);
                   }
               }
           }
+          
+          keysToRemove.forEach(key => localStorage.removeItem(key));
       }
+  }, [history]);
 
-      // TTS Generation
-      let audioBuffer: AudioBuffer | null = null;
-      let duration = 0;
-      const responseMessageId = generateId();
-      
-      // FIX: Check if there is actual content to speak (ignoring whitespace)
-      if (isTTSActive && !state.isConnectedToLive && finalContent.replace(/\s/g, '').length > 0) {
-         try {
-             // Pass the CLEANED content (without MCQ tag) to TTS
-             audioBuffer = await getTTSAudioBuffer(finalContent);
-             if (activeRequestIdRef.current !== currentRequestId) return; 
-             if (audioBuffer) duration = audioBuffer.duration;
-         } catch (e) {
-             console.error("TTS generation failed, proceeding with text only", e);
-         }
-      }
-
-      // Adjust duration for playback rate (0.94)
-      // This ensures the TypewriterText and TimelineProgress match the ACTUAL time it takes to play
-      const playbackRate = 0.94;
-      const adjustedDuration = duration > 0 ? duration / playbackRate : 0;
-
-      const responseMessage: Message = {
-        id: responseMessageId,
-        role: Role.MODEL,
-        type: MessageType.TEXT,
-        content: finalContent,
-        groundingChunks: groundingChunks,
-        mcqOptions: mcqOptions,
-        timestamp: Date.now(),
-        audioDuration: adjustedDuration 
-      };
-
-      setState(prev => ({
-        ...prev,
-        messages: [...prev.messages, responseMessage],
-        isThinking: false,
-        estimatedWaitTime: undefined
-      }));
-
-      if (audioBuffer && ctx) {
-        if (ctx.state === 'suspended') {
-            try { await ctx.resume(); } catch (e) { console.error("Error resuming AudioContext for TTS playback:", e); }
-        }
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        // Adjusted speed to 0.94 (slightly decreased)
-        source.playbackRate.value = playbackRate; 
-        source.connect(ctx.destination);
-        
-        source.onended = () => {
-          setState(prev => ({ ...prev, isAudioPlaying: false, currentlyPlayingMessageId: null }));
-          if (audioTimeoutRef.current) { 
-              clearTimeout(audioTimeoutRef.current);
-              audioTimeoutRef.current = null;
-          }
-        };
-        audioSourceRef.current = source;
-        
-        if (activeRequestIdRef.current === currentRequestId) {
-           source.start(0); 
-           setState(prev => ({ ...prev, isAudioPlaying: true, isAudioPaused: false, currentlyPlayingMessageId: responseMessageId }));
-
-           if (audioTimeoutRef.current) clearTimeout(audioTimeoutRef.current);
-           
-           // Use adjustedDuration for the timeout
-           audioTimeoutRef.current = setTimeout(() => {
-               if (audioSourceRef.current === source) {
-                   console.warn("Audio playback timeout: Forcing audio stop and state reset.");
-                   stopAudio();
-               }
-           }, adjustedDuration * 1000 + 40000);
-        }
-      }
-
-    } catch (error: any) {
-       console.error("Generation Error:", error);
-       lastProcessedMessageRef.current = null;
-       if (activeRequestIdRef.current === currentRequestId) {
-         const isNetwork = error?.message?.includes('fetch') || error?.message?.includes('network') || error?.message?.includes('Failed to fetch') || error?.code === 'ERR_NETWORK';
-         const errorMsg = isNetwork
-           ? "⚠️ Connection lost. Please check your internet and try again."
-           : "⚠️ Saraswati couldn't respond. Please try again in a moment.";
-         const errMessage = {
-           id: generateId(),
-           role: 'model' as any,
-           type: 'text' as any,
-           content: errorMsg,
-           timestamp: Date.now(),
-         };
-         setState(prev => ({
-           ...prev,
-           isThinking: false,
-           estimatedWaitTime: undefined,
-           messages: [...prev.messages, errMessage],
-         }));
-         activeRequestIdRef.current = null;
-       }
+  const handleSelectKey = async () => {
+    if (window.aistudio) {
+      await window.aistudio.openSelectKey();
+      setShowKeySelector(false);
     }
   };
 
-  const toggleRecording = () => {
-    initAudioContext();
-    if (state.isRecording) setState(prev => ({ ...prev, isRecording: false }));
-    else { stopAudio(); setState(prev => ({ ...prev, isRecording: true })); }
+  const handleLoadSession = (sessionId: string) => {
+      stopAudio();
+      const savedChat = localStorage.getItem(`saraswati_chat_${sessionId}`);
+      if (savedChat) {
+          try {
+              const loadedMessages = JSON.parse(savedChat);
+              setMessages(loadedMessages);
+              setCurrentSessionId(sessionId);
+              setActiveMcqMessageId(null);
+              
+              // Mobile UX: Close sidebar on selection
+              setIsSidebarOpen(false);
+          } catch (e) {
+              console.error("Failed to load chat", e);
+          }
+      }
   };
 
+  const handleNewTopic = () => {
+      stopAudio();
+      setMessages([]);
+      setActiveMcqMessageId(null);
+      setCurrentSessionId(Date.now().toString());
+  };
+
+  const stopAudio = () => {
+    if (audioSourceRef.current) {
+        try { audioSourceRef.current.stop(); } catch(e) {}
+        audioSourceRef.current = null;
+    }
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    
+    playingMessageIdRef.current = null;
+    setPlayingMessageId(null);
+    setPlaybackProgress(0);
+    setIsPaused(false);
+    pauseOffsetRef.current = 0;
+  };
+
+  const getAudioContext = () => {
+      if (!audioContextRef.current) {
+          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      return audioContextRef.current;
+  }
+
+  // Toggle Play/Pause
+  const togglePlayback = async () => {
+      const ctx = getAudioContext();
+      
+      if (ctx.state === 'running') {
+          await ctx.suspend();
+          setIsPaused(true);
+      } else if (ctx.state === 'suspended') {
+          await ctx.resume();
+          setIsPaused(false);
+      }
+  };
+
+  // Plays an ALREADY DECODED AudioBuffer
+  const playDecodedAudio = async (decodedBuffer: AudioBuffer, messageId: string) => {
+      stopAudio(); 
+      const ctx = getAudioContext();
+      
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      
+      try {
+          // Calculate effective duration based on the slowed down rate
+          const effectiveDuration = decodedBuffer.duration / AUDIO_PLAYBACK_RATE;
+          
+          const source = ctx.createBufferSource();
+          source.buffer = decodedBuffer;
+          source.playbackRate.value = AUDIO_PLAYBACK_RATE; // Apply slowdown
+          source.connect(ctx.destination);
+          source.start(0);
+          
+          audioSourceRef.current = source;
+          startTimeRef.current = ctx.currentTime;
+          
+          playingMessageIdRef.current = messageId;
+          setPlayingMessageId(messageId);
+          setIsPaused(false);
+
+          // Update message with audio duration (effective)
+          setMessages(prev => prev.map(msg => 
+              msg.id === messageId ? { ...msg, audioDuration: effectiveDuration } : msg
+          ));
+
+          const animate = () => {
+              if (!audioSourceRef.current || playingMessageIdRef.current !== messageId) return;
+
+              if (ctx.state === 'suspended') {
+                  animationFrameRef.current = requestAnimationFrame(animate);
+                  return;
+              }
+
+              const elapsed = ctx.currentTime - startTimeRef.current;
+              const progress = Math.min(elapsed / effectiveDuration, 1);
+              setPlaybackProgress(progress);
+              
+              if (progress < 1) {
+                  animationFrameRef.current = requestAnimationFrame(animate);
+              } else {
+                  stopAudio();
+              }
+          };
+          animate();
+
+          source.onended = () => {
+              // Only stop if we naturally finished, not if paused
+              if (playingMessageIdRef.current === messageId && ctx.state === 'running' && Math.abs(ctx.currentTime - startTimeRef.current - effectiveDuration) < 0.5) {
+                  stopAudio();
+              }
+          };
+      } catch (e) {
+          console.error("Error playing audio", e);
+      }
+  };
+
+  const handleSendMessage = async (text: string, image?: string) => {
+    if (!text.trim() && !image) return;
+
+    // Handle Interruption: If audio is currently playing, we consider this an interruption.
+    if (playingMessageIdRef.current) {
+        const interruptedId = playingMessageIdRef.current;
+        const ctx = getAudioContext();
+        setMessages(prev => prev.map(msg => {
+            if (msg.id === interruptedId) {
+                let progress = 0;
+                if (msg.audioDuration && ctx && startTimeRef.current) {
+                    const elapsed = ctx.currentTime - startTimeRef.current;
+                    progress = Math.min(Math.max(elapsed / msg.audioDuration, 0), 1);
+                }
+                return { ...msg, interrupted: true, audioPlayedPercentage: progress };
+            }
+            return msg;
+        }));
+    }
+
+    stopAudio(); 
+    setActiveMcqMessageId(null); 
+
+    // Resume context early to ensure it's active after async generation
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch(e) {}
+    }
+
+    // Save to History if this is the start of a new conversation
+    if (messages.length === 0) {
+        const newHistoryItem: HistoryItem = {
+            id: currentSessionId,
+            title: text.length > 25 ? text.substring(0, 25) + '...' : text,
+            date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+        };
+        setHistory(prev => [newHistoryItem, ...prev]);
+        // History saving is handled by useEffect
+    }
+
+    const newUserMsg: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      text: text,
+      image: image,
+      timestamp: Date.now()
+    };
+
+    setMessages(prev => [...prev, newUserMsg]);
+    setIsLoading(true);
+
+    try {
+      const response = await SaraswatiService.sendMessage(text, messages, image);
+      
+      const newAiMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'model',
+        text: response.text, 
+        rawText: response.rawText, 
+        groundingMetadata: response.groundingMetadata,
+        mcq: response.mcq,
+        timestamp: Date.now()
+      };
+
+      let decodedAudio: AudioBuffer | null = null;
+      try {
+        console.log("Attempting to generate TTS for message...");
+        const audioBuffer = await SaraswatiService.textToSpeech(response.rawText);
+        if (audioBuffer) {
+            console.log("TTS generation successful, decoding audio data...");
+            const ctx = getAudioContext();
+            try {
+                decodedAudio = await ctx.decodeAudioData(audioBuffer.slice(0));
+                console.log("Audio decoding successful, duration:", decodedAudio.duration);
+            } catch (decodeError) {
+                console.error("Failed to decode audio data:", decodeError);
+            }
+        } else {
+            console.warn("TTS generation returned null buffer");
+        }
+      } catch (e) {
+        console.warn("Audio generation failed", e);
+      }
+      
+      setIsLoading(false);
+      
+      if (decodedAudio) {
+          setPlayingMessageId(newAiMsg.id);
+          setPlaybackProgress(0);
+          playingMessageIdRef.current = newAiMsg.id;
+      }
+
+      setMessages(prev => {
+          const updatedMessages = [...prev, newAiMsg];
+          if (newAiMsg.mcq) {
+              setActiveMcqMessageId(newAiMsg.id);
+          }
+          return updatedMessages;
+      });
+
+      if (decodedAudio) {
+          playDecodedAudio(decodedAudio, newAiMsg.id);
+      }
+
+    } catch (error) {
+      console.error("Error:", error);
+      setIsLoading(false);
+      setActiveMcqMessageId(null); 
+      
+      const errorMsgId = Date.now().toString();
+      const errorText = "I apologize, there was a technical glitch. Please try again.";
+      setMessages(prev => [...prev, {
+        id: errorMsgId,
+        role: 'model',
+        text: errorText,
+        timestamp: Date.now()
+      }]);
+
+      try {
+          const ab = await SaraswatiService.textToSpeech(errorText);
+          if (ab) {
+              const ctx = getAudioContext();
+              const db = await ctx.decodeAudioData(ab);
+              playDecodedAudio(db, errorMsgId);
+          }
+      } catch(e) {}
+    }
+  };
+
+  const handleSelectMcqOption = async (messageId: string, optionLabel: string) => {
+      setMessages(prevMessages => {
+          return prevMessages.map(msg => {
+              if (msg.id === messageId && msg.mcq) {
+                  return { ...msg, mcq: { ...msg.mcq, selectedOption: optionLabel } };
+              }
+              return msg;
+          });
+      });
+
+      const systemReplyText = `My selection is option ${optionLabel}.`;
+      
+      setIsLoading(true); 
+      stopAudio(); 
+      setActiveMcqMessageId(null); 
+
+      // Resume context early
+      const ctx = getAudioContext();
+      if (ctx.state === 'suspended') {
+          try { await ctx.resume(); } catch(e) {}
+      }
+
+      try {
+          const response = await SaraswatiService.sendMessage(systemReplyText, messages);
+          
+          const newAiMsg: Message = {
+            id: (Date.now() + 1).toString(),
+            role: 'model',
+            text: response.text, 
+            rawText: response.rawText, 
+            groundingMetadata: response.groundingMetadata,
+            mcq: response.mcq, 
+            timestamp: Date.now()
+          };
+
+          let decodedAudio: AudioBuffer | null = null;
+          try {
+            const audioBuffer = await SaraswatiService.textToSpeech(response.rawText);
+            if (audioBuffer) {
+                const ctx = getAudioContext();
+                decodedAudio = await ctx.decodeAudioData(audioBuffer.slice(0));
+            }
+          } catch (e) {
+            console.warn("Audio generation failed for post-MCQ response", e);
+          }
+          
+          setIsLoading(false);
+          
+          if (decodedAudio) {
+              setPlayingMessageId(newAiMsg.id);
+              setPlaybackProgress(0);
+              playingMessageIdRef.current = newAiMsg.id;
+          }
+
+          setMessages(prev => {
+              const updatedMessages = [...prev, newAiMsg];
+              if (newAiMsg.mcq) {
+                  setActiveMcqMessageId(newAiMsg.id);
+              }
+              return updatedMessages;
+          });
+
+          if (decodedAudio) {
+              playDecodedAudio(decodedAudio, newAiMsg.id);
+          }
+
+      } catch (error) {
+          console.error("Error post-MCQ response:", error);
+          setIsLoading(false);
+          setActiveMcqMessageId(null); 
+          
+          const errorMsgId = Date.now().toString();
+          const errorText = "I apologize, there was a technical glitch. Please try again.";
+          setMessages(prev => [...prev, {
+            id: errorMsgId,
+            role: 'model',
+            text: errorText,
+            timestamp: Date.now()
+          }]);
+      }
+  };
+
+  if (showKeySelector) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-[#000000] text-white p-6 text-center">
+        <h1 className="text-3xl font-bold mb-4 text-yellow-500">Setup Required</h1>
+        <p className="mb-8 text-stone-300 max-w-md">
+          To use the advanced teaching models (Gemini 3 Flash) and image generation, you must select a paid API key from a billing-enabled Google Cloud project.
+        </p>
+        <button 
+          onClick={handleSelectKey}
+          className="px-8 py-3 bg-stone-800 border border-stone-600 hover:border-yellow-500 hover:text-yellow-500 rounded-full font-bold shadow-lg transition transform hover:scale-105"
+        >
+          Select API Key
+        </button>
+        <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noreferrer" className="mt-8 text-sm text-stone-500 hover:text-stone-300 underline">
+          Read about Billing Requirements
+        </a>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex h-screen bg-[#1a1a1a] relative text-stone-300 font-sans overflow-hidden">
+    <div className="flex flex-col h-screen overflow-hidden bg-black text-stone-300 relative">
+      
+      <Header 
+        mode={mode} 
+        onToggleLive={() => setMode(mode === 'text' ? 'live' : 'text')} 
+        onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+        onNewTopic={handleNewTopic} 
+      />
+      
       <Sidebar 
         isOpen={isSidebarOpen} 
-        notebook={state.notebook} 
-        currentSessionId={currentSessionId}
-        onSelectEntry={loadSession} 
-        onNewSession={handleNewNote}
+        onClose={() => setIsSidebarOpen(false)}
+        history={history} 
+        onLoadSession={handleLoadSession}
       />
-      <div className={`flex-1 flex flex-col h-full transition-all duration-300 ${isSidebarOpen ? 'ml-64' : 'ml-0'}`}>
-        <header className="h-16 border-b border-stone-800 flex items-center justify-between px-4 bg-[#1a1a1a]/90 backdrop-blur-md z-20">
-          <div className="flex items-center space-x-4">
-            <button onClick={() => setSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-stone-800 rounded-lg">
-              <Menu className="w-6 h-6 text-stone-400" />
-            </button>
-            <div className="flex items-center">
-              <div className="w-9 h-9 rounded-full bg-yellow-500 flex items-center justify-center text-stone-900 font-bold text-xl font-['Arial'] mr-2 relative shadow-md shadow-yellow-500/10">
-                <span className="-mt-0.5">स</span>
-              </div>
-              <div className="flex items-center h-10">
-                <span className="text-2xl font-bold text-stone-200 font-['Arial'] mt-1">Saraswati</span>
-              </div>
-            </div>
-          </div>
-          <div className="flex items-center space-x-3">
-             <button 
-               onClick={handleNewNote}
-               className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-full text-white transition-colors border border-indigo-700 shadow-lg"
-             >
-               <PlusCircle className="w-4 h-4" />
-               <span className="text-sm font-medium">New Note</span>
-             </button>
-          </div>
-        </header>
 
-        <ChatInterface 
-          messages={state.messages} 
-          isThinking={state.isThinking}
-          isAudioPaused={state.isAudioPaused}
-          currentlyPlayingMessageId={state.currentlyPlayingMessageId} 
-          estimatedWaitTime={state.estimatedWaitTime}
-          onSendMessage={(text) => handleSendMessage(text)}
-        />
+      {/* Main Content Area */}
+      <main className="flex-1 flex overflow-hidden relative">
+          
+          {/* Left / Main Column: Chat */}
+          <div className="flex-1 flex flex-col relative w-full lg:w-auto min-w-0">
+            <ErrorBoundary>
+                <Blackboard 
+                    messages={messages} 
+                    isLoading={isLoading} 
+                    playingMessageId={playingMessageId}
+                    playbackProgress={playbackProgress}
+                    isPaused={isPaused}
+                    activeMcqMessageId={activeMcqMessageId} 
+                    onSelectMcqOption={handleSelectMcqOption} 
+                />
+            </ErrorBoundary>
+            
+            <InputBar 
+                onSend={handleSendMessage} 
+                disabled={mode === 'live'} 
+                onTogglePlayback={togglePlayback}
+                isPlaying={!!playingMessageId}
+                isPaused={isPaused}
+            />
+          </div>
 
-        <div className="p-4 pb-6">
-          <InputArea 
-            onSendMessage={handleSendMessage} 
-            isRecording={state.isRecording}
-            toggleRecording={toggleRecording}
-            isAudioPlaying={state.isAudioPlaying}
-            isAudioPaused={state.isAudioPaused}
-            onTogglePause={togglePauseAudio}
-          />
-        </div>
-      </div>
-      {isSidebarOpen && (
-        <div className="fixed inset-0 bg-black/50 z-10 md:hidden" onClick={() => setSidebarOpen(false)} />
+      </main>
+
+      {/* Live Mode Overlay */}
+      {mode === 'live' && (
+        <LiveOverlay onClose={() => setMode('text')} />
       )}
     </div>
   );

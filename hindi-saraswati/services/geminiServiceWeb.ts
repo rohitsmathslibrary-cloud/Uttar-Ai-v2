@@ -1,128 +1,231 @@
-// Web version of geminiService - uses proxy instead of direct API calls
-import { MODELS, SYSTEM_INSTRUCTION } from "../constants";
-import { callGeminiProxy } from "./geminiWebProxy";
+import { Modality } from "@google/genai";
+import { SYSTEM_INSTRUCTION } from "../constants";
+import { Models, Message } from "../types";
 
-export const getEstimatedWaitTime = (taskType: 'math' | 'fast', prompt: string = ""): string => {
-  if (taskType === 'math') return "~1-3 mins";
-  return "~3-5 seconds";
-};
+const ELEVEN_LABS_VOICE_ID = '';
 
-// Audio Context Singleton
-let audioContext: AudioContext | null = null;
-export const initAudioContext = (): AudioContext => {
-  if (!audioContext) {
-    audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+const MCQ_EXTRACT_REGEX = /QUESTION_START\s*([\s\S]*?)\s*OPTIONS_START\s*([\s\S]*?)\s*OPTIONS_END\s*QUESTION_END/i;
+const MCQ_BLOCK_REGEX = /QUESTION_START[\s\S]*?QUESTION_END/gi;
+const THOUGHT_BLOCK_REGEX = /^(thought|thinking):?\s*[\s\S]*?(\n\n|(?=\n[A-Z][a-z])|$)/i;
+const THOUGHT_TAG_REGEX = /<(thought|thinking)>[\s\S]*?<\/\1>/gi;
+const SYSTEM_PROMPT_LABELS_REGEX = /^(Role|Accent\/Tone|Language|Context|Vibe|IB Curriculum|IB Learner|Goal|Structure|STRICT LANGUAGE RULE):?.*$/gim;
+
+// Proxy helper
+const PROXY_URL = 'https://geminiproxy-ljtntzc7pq-el.a.run.app';
+async function callProxy(model: string, body: object): Promise<any> {
+  const response = await fetch(`${PROXY_URL}?model=${encodeURIComponent(model)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Referer': 'https://hindi-saraswati.uttarai.in/' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`Proxy error: ${response.status}`);
+  return response.json();
+}
+
+export class SaraswatiService {
+
+  public static stripThought(text: string): string {
+    return text
+      .replace(THOUGHT_BLOCK_REGEX, '')
+      .replace(THOUGHT_TAG_REGEX, '')
+      .replace(SYSTEM_PROMPT_LABELS_REGEX, '')
+      .trim();
   }
-  if (audioContext.state === 'suspended') audioContext.resume();
-  return audioContext;
-};
-export const getAudioContext = (): AudioContext | null => audioContext;
 
-export const generateMathResponse = async (
-  history: { role: string; parts: { text: string }[] }[],
-  currentPrompt: string,
-  imagePart?: { inlineData: { mimeType: string; data: string } }
-) => {
-  try {
-    const sanitizedHistory = history.map(h => ({
-      role: h.role === 'model' ? 'model' : 'user',
-      parts: h.parts.filter(p => p.text && p.text.trim().length > 0).length > 0
-        ? h.parts.filter(p => p.text && p.text.trim().length > 0)
-        : [{ text: '...' }]
+  public static cleanTextForAudio(rawText: string): string {
+    let workingText = SaraswatiService.stripThought(rawText);
+    let mcqQuestionExtracted: string | null = null;
+    let preMcqTextForDuplicateCheck = '';
+    const mcqMatch = workingText.match(MCQ_EXTRACT_REGEX);
+    if (mcqMatch) {
+        const fullMcqBlock = mcqMatch[0];
+        mcqQuestionExtracted = mcqMatch[1].trim();
+        preMcqTextForDuplicateCheck = workingText.substring(0, mcqMatch.index || 0);
+        workingText = workingText.replace(fullMcqBlock, mcqQuestionExtracted);
+    }
+    let cleanedText = workingText
+        .replace(/\$\$/g, '').replace(/\$/g, '')
+        .replace(new RegExp('\\*\\*(.*?)\\*\\*', 'g'), '$1')
+        .replace(new RegExp('\\*(.*?)\\*', 'g'), '$1')
+        .replace(new RegExp('__(.*?)__', 'g'), '$1')
+        .replace(new RegExp('_(.*?)_', 'g'), '$1')
+        .replace(/##\s*/g, '').replace(/###\s*/g, '')
+        .replace(/-\s*/g, '').replace(/\*\s*/g, '')
+        .replace(/\d+\.\s*/g, '').replace(/---/g, '')
+        .replace(/\\/g, ' ')
+        .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '$1 over $2')
+        .replace(/\\times/g, ' times ').replace(/\\cdot/g, ' times ')
+        .replace(/=/g, ' equals ').replace(/\^2/g, ' squared')
+        .replace(/\^3/g, ' cubed').replace(/\^/g, ' to the power of ')
+        .replace(/\\rightarrow/g, ' gives ').replace(/\\Delta/g, ' change in ')
+        .replace(/\\approx/g, ' approximately ').replace(/\\circ/g, ' degrees ')
+        .replace(/_/g, ' sub ').replace(/\{/g, '').replace(/\}/g, '')
+        .replace(/Bold Yellow:/gi, '').replace(/highlighted in yellow/gi, '')
+        .replace(/([.,?!])(\S)/g, '$1 $2')
+        .replace(/\s+/g, ' ').trim();
+    if (mcqQuestionExtracted && preMcqTextForDuplicateCheck.trim()) {
+        const cleanedPreMcqText = SaraswatiService.cleanTextForAudio(preMcqTextForDuplicateCheck);
+        const escapedQuestion = mcqQuestionExtracted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const duplicateQuestionRegex = new RegExp(`(${escapedQuestion})\\s*$`, 'i');
+        if (cleanedPreMcqText.match(duplicateQuestionRegex)) {
+             const cleanedPreMcqTextWithoutDuplicate = cleanedPreMcqText.replace(duplicateQuestionRegex, '');
+             cleanedText = cleanedText.replace(cleanedPreMcqText, cleanedPreMcqTextWithoutDuplicate);
+        }
+    }
+    return cleanedText.trim();
+  }
+
+  public static cleanTextForDisplay(rawText: string): string {
+    let workingText = SaraswatiService.stripThought(rawText);
+    const mcqMatch = workingText.match(MCQ_EXTRACT_REGEX);
+    if (mcqMatch) {
+        const fullBlock = mcqMatch[0];
+        const question = mcqMatch[1].trim();
+        const matchIndex = mcqMatch.index!;
+        const preText = workingText.substring(0, matchIndex);
+        const postText = workingText.substring(matchIndex + fullBlock.length);
+        const escapedQuestion = question.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const duplicateRegex = new RegExp(`(${escapedQuestion})\\s*$`, 'i');
+        let cleanedPreText = preText;
+        if (preText.match(duplicateRegex)) {
+             cleanedPreText = preText.replace(duplicateRegex, '').trimEnd();
+        }
+        workingText = cleanedPreText + postText;
+    } else {
+        workingText = workingText.replace(MCQ_BLOCK_REGEX, '');
+    }
+    const partialMcqIndex = workingText.indexOf('QUESTION_START');
+    if (partialMcqIndex !== -1) workingText = workingText.substring(0, partialMcqIndex);
+    return workingText.trim();
+  }
+
+  static async sendMessage(text: string, history: Message[], imageBase664?: string, onChunk?: (text: string) => void): Promise<{
+    text: string; rawText: string; groundingMetadata?: any; mcq?: Message['mcq'];
+  }> {
+    let promptText = text.trim();
+    if (!promptText && imageBase664) {
+        promptText = "Analyze this image. If it shows a scientific concept, explain it step-by-step as Saraswati. If not science-related, acknowledge it briefly and steer back to Science.";
+    }
+    const contents: any[] = history.map(msg => ({
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.rawText || msg.text }]
     }));
     const currentParts: any[] = [];
-    if (currentPrompt && currentPrompt.trim()) currentParts.push({ text: currentPrompt });
-    if (imagePart) currentParts.push(imagePart);
-    if (currentParts.length === 0) currentParts.push({ text: "Analyze this." });
-    const contents = [...sanitizedHistory, { role: 'user', parts: currentParts }];
-    const data = await callGeminiProxy(MODELS.FLASH, {
-      system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-      contents,
-      generation_config: { max_output_tokens: 10000, thinking_config: { thinking_budget: 4000 } },
-    });
-    const text = data.candidates?.[0]?.content?.parts?.find((p: any) => p.text)?.text || '';
-    const groundingChunks = data.candidates?.[0]?.groundingMetadata?.groundingChunks;
-    return { text, groundingChunks };
-  } catch (error) {
-    console.error("Gemini Math Error:", error);
-    throw error;
-  }
-};
+    if (imageBase664) currentParts.push({ inlineData: { mimeType: 'image/jpeg', data: imageBase664 } });
+    currentParts.push({ text: promptText });
+    contents.push({ role: 'user', parts: currentParts });
 
-const cleanTextForSpeech = (text: string): string => {
-  if (!text) return "";
-  let t = text;
-  t = t.replace(/<<[\s\S]*?>>/g, "");
-  t = t.replace(/[*_~`#]/g, " ");
-  t = t.replace(/\[.*?\]/g, "");
-  t = t.replace(/\n+/g, ". ");
-  t = t.replace(/---/g, " ");
-  t = t.replace(/([\u2700-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF])/g, '');
-  t = t.replace(/\$?\$([^$]+)\$? \$/g, (_, m) => {
-    m = m.replace(/\\frac\s*{([^}]*)}\s*{([^}]*)}/g, "$1 over $2");
-    m = m.replace(/\\sqrt\s*{([^}]*)}/g, "square root of $1");
-    m = m.replace(/\^2/g, " squared").replace(/\^3/g, " cubed");
-    m = m.replace(/\^{([^}]*)}/g, " to the power of $1");
-    m = m.replace(/_/g, " subscript ");
-    m = m.replace(/\\cdot|\\times/g, " times ");
-    m = m.replace(/\\div/g, " divided by ");
-    m = m.replace(/\\pm/g, " plus or minus ");
-    m = m.replace(/\\infty/g, " infinity ");
-    m = m.replace(/\\pi/g, " pi ");
-    m = m.replace(/\\theta/g, " theta ");
-    m = m.replace(/\\int/g, " integral ");
-    m = m.replace(/[=]/g, " equals ");
-    m = m.replace(/\\/g, " ");
-    return m;
-  });
-  t = t.replace(/"/g, "'");
-  t = t.replace(/\s+/g, " ").trim();
-  return t;
-};
+    let combinedText = "";
+    let mcqForDisplay: Message['mcq'] | undefined = undefined;
+    let groundingMetadata: any = undefined;
 
-const decodeAudio = async (base64: string, ctx: AudioContext): Promise<AudioBuffer> => {
-  const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-  const dataInt16 = new Int16Array(bytes.buffer);
-  const buffer = ctx.createBuffer(1, dataInt16.length, 24000);
-  const channelData = buffer.getChannelData(0);
-  for (let i = 0; i < dataInt16.length; i++) channelData[i] = dataInt16[i] / 32768.0;
-  return buffer;
-};
-
-export const getTTSAudioBuffer = async (text: string): Promise<AudioBuffer | null> => {
-  const ctx = initAudioContext();
-  if (!text || text.trim().length === 0) return null;
-  const rawText = text.length > 2500 ? text.substring(0, 2500) + "..." : text;
-  const spokenText = cleanTextForSpeech(rawText);
-  if (!spokenText || spokenText.trim().length === 0) return null;
-
-  const prompts = [
-    `Speak with a highly energetic, excited, and warm Indian English accent. Be expressive and engaging: "${spokenText}"`,
-    `Speak with an Indian English accent: "${spokenText}"`,
-    spokenText
-  ];
-
-  for (const prompt of prompts) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const data = await callGeminiProxy(MODELS.TTS, {
-          contents: [{ parts: [{ text: prompt }] }],
-          generation_config: {
-            response_modalities: ["AUDIO"],
-            speech_config: { voice_config: { prebuilt_voice_config: { voice_name: "Kore" } } }
-          }
-        });
-        const part = data.candidates?.[0]?.content?.parts?.[0];
-        const audioData = part?.inline_data?.data || part?.inlineData?.data;
-        if (audioData) return await decodeAudio(audioData, ctx);
-        await new Promise(r => setTimeout(r, 500));
-      } catch (e) {
-        console.warn(`TTS attempt failed:`, e);
-        await new Promise(r => setTimeout(r, 500));
-      }
+    try {
+      const proxyData = await callProxy(Models.FLASH, {
+        system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+        contents,
+        tools: [{ google_search: {} }],
+        generation_config: { max_output_tokens: 10000, thinking_config: { thinking_budget: 4000 } }
+      });
+      combinedText = (proxyData.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('');
+      groundingMetadata = proxyData.candidates?.[0]?.groundingMetadata;
+      if (onChunk) onChunk(SaraswatiService.cleanTextForDisplay(combinedText));
+    } catch (e: any) {
+      throw e;
     }
+
+    const mcqMatch = combinedText.match(MCQ_EXTRACT_REGEX);
+    if (mcqMatch) {
+        const questionText = mcqMatch[1].trim();
+        const optionsText = mcqMatch[2].trim();
+        const options = optionsText.split('\n').map(line => {
+            const labelMatch = line.match(/^([A-D])\)\s*(.*)/);
+            if (labelMatch) return { label: labelMatch[1], text: labelMatch[2].trim() };
+            return { label: '', text: line.trim() };
+        }).filter(option => option.label !== '');
+        if (questionText && options.length === 4) {
+            const matchEndIndex = mcqMatch.index! + mcqMatch[0].length;
+            if (matchEndIndex < combinedText.length) combinedText = combinedText.substring(0, matchEndIndex);
+            mcqForDisplay = { question: questionText, options };
+            const textBeforeMcqRaw = combinedText.substring(0, mcqMatch.index!);
+            const escapedQuestion = questionText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const duplicateRegex = new RegExp(`(${escapedQuestion})\\s*$`, 'i');
+            let textBeforeMcqDeduped = textBeforeMcqRaw;
+            if (textBeforeMcqRaw.match(duplicateRegex)) textBeforeMcqDeduped = textBeforeMcqRaw.replace(duplicateRegex, '').trimEnd();
+            const cleanedForLengthCalc = SaraswatiService.cleanTextForDisplay(textBeforeMcqDeduped);
+            mcqForDisplay.mcqActivationCharIndex = cleanedForLengthCalc.length;
+        }
+    }
+    const finalResponseTextForDisplay = SaraswatiService.cleanTextForDisplay(combinedText);
+    return { text: finalResponseTextForDisplay, rawText: combinedText, groundingMetadata, mcq: mcqForDisplay };
   }
-  return null;
-};
+
+  static async textToSpeech(text: string): Promise<ArrayBuffer | null> {
+    const cleanText = SaraswatiService.cleanTextForAudio(text);
+    if (!cleanText || cleanText.trim() === '') return null;
+
+    const maxRetries = 5;
+    let attempt = 0;
+    while (attempt < maxRetries) {
+        try {
+            const response = await callProxy(Models.TTS, {
+                contents: [{ parts: [{ text: `Say this in a warm, motherly Indian Hinglish accent (Latin script): ${cleanText}` }] }],
+                generation_config: {
+                    response_modalities: ['AUDIO'],
+                    speech_config: { voice_config: { prebuilt_voice_config: { voice_name: 'Kore' } } }
+                }
+            });
+            const candidate = response.candidates?.[0];
+            if (!candidate) throw new Error('No candidates');
+            if (candidate.finishReason === 'SAFETY' || candidate.finishReason === 'BLOCKLIST') return null;
+            const parts = candidate.content?.parts || [];
+            for (const part of parts) {
+                const base64Audio = part.inlineData?.data || part.inline_data?.data;
+                if (base64Audio) {
+                    let clean = base64Audio.replace(/\s/g, '');
+                    while (clean.length % 4 !== 0) clean += '=';
+                    const binary = atob(clean);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                    if (bytes.length > 4) {
+                        const header = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+                        if (header === 'RIFF' || header === 'ID3' || (bytes[0] === 0xFF && (bytes[1] & 0xE0) === 0xE0)) return bytes.buffer;
+                    }
+                    return this.addWavHeader(bytes, 24000, 1, 16);
+                }
+            }
+            throw new Error('No audio data in response');
+        } catch (e) {
+            attempt++;
+            if (attempt >= maxRetries) return null;
+            await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt - 1) * 1000));
+        }
+    }
+    return null;
+  }
+
+  private static addWavHeader(pcmData: Uint8Array, sampleRate: number, numChannels: number = 1, bitDepth: number = 16): ArrayBuffer {
+    const header = new ArrayBuffer(44);
+    const view = new DataView(header);
+    this.writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + pcmData.length, true);
+    this.writeString(view, 8, 'WAVE');
+    this.writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true);
+    view.setUint16(32, numChannels * (bitDepth / 8), true);
+    view.setUint16(34, bitDepth, true);
+    this.writeString(view, 36, 'data');
+    view.setUint32(40, pcmData.length, true);
+    const wavBuffer = new Uint8Array(header.byteLength + pcmData.byteLength);
+    wavBuffer.set(new Uint8Array(header), 0);
+    wavBuffer.set(pcmData, header.byteLength);
+    return wavBuffer.buffer;
+  }
+
+  private static writeString(view: DataView, offset: number, string: string) {
+    for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}

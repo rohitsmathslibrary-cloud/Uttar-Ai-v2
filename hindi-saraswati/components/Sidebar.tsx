@@ -1,68 +1,45 @@
+
 import React from 'react';
-import { BookOpen, Clock, PlusCircle } from 'lucide-react';
-import { NotebookEntry } from '../types';
+import { HistoryItem } from '../types';
 
 interface SidebarProps {
   isOpen: boolean;
-  notebook: NotebookEntry[];
-  currentSessionId: string | null;
-  onSelectEntry: (id: string) => void;
-  onNewSession: () => void;
+  onClose: () => void;
+  history: HistoryItem[];
+  onLoadSession: (id: string) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ isOpen, notebook, currentSessionId, onSelectEntry, onNewSession }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose, history, onLoadSession }) => {
   return (
-    <div 
-      className={`fixed top-0 left-0 h-full bg-[#151515] border-r border-stone-800 transition-all duration-300 z-30 ${
-        isOpen ? 'w-64' : 'w-0'
-      } overflow-hidden font-['Arial']`}
-    >
+    <div className={`fixed inset-y-0 left-0 w-80 bg-[#1a1a1a] border-r border-stone-800 transform transition-transform duration-300 ease-in-out z-50 ${isOpen ? 'translate-x-0' : '-translate-x-full'}`}>
       <div className="p-6 h-full flex flex-col">
-        <div className="flex items-center space-x-3 mb-8">
-          <div className="w-10 h-10 min-w-[2.5rem] rounded-full bg-yellow-600 flex items-center justify-center text-white font-bold text-xl shadow-lg border border-yellow-500/30">
-            ल
-          </div>
-          <h1 className="text-xl font-bold text-yellow-500 whitespace-nowrap">
-            My Notebook
-          </h1>
+        <div className="flex justify-between items-center mb-8">
+          <h2 className="text-xl font-bold text-white tracking-wide">My Notes</h2>
+          <button onClick={onClose} className="text-stone-400 hover:text-white">
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+          </button>
         </div>
 
-        <button 
-          onClick={onNewSession}
-          className="flex items-center space-x-2 w-full bg-stone-800 hover:bg-stone-700 text-stone-300 p-3 rounded-lg transition-colors mb-6 group"
-        >
-           <PlusCircle className="w-5 h-5 group-hover:text-yellow-500" />
-           <span className="font-medium">New Session</span>
-        </button>
-
-        <div className="flex-1 overflow-y-auto space-y-2 pr-2">
-          <h2 className="text-xs uppercase tracking-wider text-stone-500 font-bold mb-2">Previous Sessions</h2>
-          {notebook.length === 0 && (
-            <p className="text-stone-600 text-sm italic text-center mt-4">No conversations yet.</p>
-          )}
-          {notebook.map((entry) => (
-            <div 
-              key={entry.id}
-              onClick={() => onSelectEntry(entry.id)}
-              className={`p-3 rounded-lg cursor-pointer group transition-all border border-transparent ${
-                currentSessionId === entry.id 
-                  ? 'bg-stone-800 border-stone-700' 
-                  : 'hover:bg-stone-800/50 hover:border-stone-800'
-              }`}
-            >
-              <h3 className={`text-sm font-medium truncate ${currentSessionId === entry.id ? 'text-yellow-500' : 'text-stone-300 group-hover:text-yellow-400'}`}>
-                {entry.title || "Untitled Note"}
-              </h3>
-              <div className="flex items-center text-stone-600 text-xs mt-1">
-                <Clock className="w-3 h-3 mr-1" />
-                {entry.date}
-              </div>
+        <div className="flex-1 overflow-y-auto space-y-4">
+          {history.length === 0 ? (
+            <div className="text-stone-500 text-center italic mt-10">
+              No study records yet.
+              <br/>Start a conversation!
             </div>
-          ))}
+          ) : (
+            history.map((item) => (
+              <div 
+                key={item.id} 
+                onClick={() => onLoadSession(item.id)}
+                className="p-4 rounded-lg bg-stone-900 border border-stone-800 hover:border-yellow-600/50 cursor-pointer transition-colors group"
+              >
+                <h3 className="text-stone-300 font-medium group-hover:text-yellow-500 transition-colors line-clamp-2">{item.title}</h3>
+                <p className="text-xs text-stone-500 mt-2">{item.date}</p>
+              </div>
+            ))
+          )}
         </div>
       </div>
     </div>
   );
 };
-
-export default Sidebar;
