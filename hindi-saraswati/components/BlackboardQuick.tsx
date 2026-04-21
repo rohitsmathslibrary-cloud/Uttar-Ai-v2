@@ -26,7 +26,7 @@ const STANDARD_FONT_CLASSES = "font-chalk text-[1.3rem] md:text-[1.45rem] leadin
 
 // Markdown Components with strict font enforcement
 const markdownComponents = {
-    p: ({children}: any) => <div className={`mb-4 ${STANDARD_FONT_CLASSES}`}>{children}</div>,
+    p: ({children}: any) => <div className={`mb-4 ${STANDARD_FONT_CLASSES}`} style={{color:'inherit'}}>{children}</div>,
     strong: ({children}: any) => <strong className={`text-yellow-500 font-bold ${STANDARD_FONT_CLASSES}`}>{children}</strong>,
     em: ({children}: any) => <em className={`text-yellow-500 not-italic font-bold ${STANDARD_FONT_CLASSES}`}>{children}</em>, 
     li: ({children}: any) => <li className={`marker:text-yellow-500 mb-2 pl-2 ${STANDARD_FONT_CLASSES}`}>{children}</li>,
