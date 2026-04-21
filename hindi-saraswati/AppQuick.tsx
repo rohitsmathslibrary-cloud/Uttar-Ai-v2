@@ -331,7 +331,7 @@ const App: React.FC<{onSwitchMode?: () => void}> = ({ onSwitchMode }) => {
                     messages={messages} 
                     isLoading={isLoading} 
                     isPaused={isPaused}
-                    onTogglePause={() => setIsPaused(!isPaused)}
+                    onTogglePlayback={() => setIsPaused(!isPaused)}
                     onTypingComplete={() => setIsTypingComplete(true)}
                     activeMcqMessageId={activeMcqMessageId} 
                     onSelectMcqOption={handleSelectMcqOption} 
@@ -342,8 +342,8 @@ const App: React.FC<{onSwitchMode?: () => void}> = ({ onSwitchMode }) => {
                 onSend={handleSendMessage} 
                 disabled={(isLoading || !!activeMcqMessageId) && !isPaused} 
                 isPaused={isPaused}
-                onTogglePause={() => setIsPaused(!isPaused)}
-                isProcessing={(!isLoading && !isTypingComplete) || !!activeMcqMessageId}
+                onTogglePlayback={() => setIsPaused(!isPaused)}
+                isPlaying={(!isLoading && !isTypingComplete) || !!activeMcqMessageId}
             />
           </div>
 
