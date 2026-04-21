@@ -1,431 +1,355 @@
 
+import React, { useState, useEffect, useRef } from 'react';
+import { Header } from './components/Header';
+import { BlackboardQuick } from './components/BlackboardQuick';
+import { InputBar } from './components/InputBar';
+import { Sidebar } from './components/Sidebar';
+import { Message, UserMode, HistoryItem } from './types';
+import { SaraswatiService } from './services/geminiServiceQuick';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import 'katex/dist/katex.min.css';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Menu, PlusCircle } from 'lucide-react';
-import ChatInterface from './components/ChatInterface';
-import InputArea from './components/InputArea';
-import Sidebar from './components/Sidebar';
-import { AppState, Message, Role, MessageType } from './types';
-import { generateMathResponse, getEstimatedWaitTime } from './services/geminiServiceQuickWeb';
-import { trackStudentPrompt, trackSessionStart, isMCQResponse } from './services/analyticsService';
-
-// Helper to generate IDs
-const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2);
-
-const AppQuick: React.FC = () => {
-  // State
-  const [state, setState] = useState<AppState>({
-    messages: [],
-    isRecording: false,
-    isThinking: false,
-    isAudioPlaying: false,
-    isAudioPaused: false,
-    currentlyPlayingMessageId: null,
-    isConnectedToLive: false,
-    inputMode: 'text',
-    notebook: [],
-    estimatedWaitTime: undefined
-  });
+const App: React.FC<{onSwitchMode?: () => void}> = ({ onSwitchMode }) => {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [isTypingComplete, setIsTypingComplete] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [showKeySelector, setShowKeySelector] = useState(false);
+  const [history, setHistory] = useState<HistoryItem[]>([]); 
   
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [isSidebarOpen, setSidebarOpen] = useState(false);
-  
-  // Deduplication Ref (Critical for preventing 20 -> 2020 issue)
-  const lastProcessedMessageRef = useRef<{ content: string; timestamp: number } | null>(null);
+  // Session Management
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() => Date.now().toString());
 
-  // Ref to hold the most current messages array (updated synchronously)
-  const latestMessagesRef = useRef<Message[]>(undefined);
+  // MCQ State
+  const [activeMcqMessageId, setActiveMcqMessageId] = useState<string | null>(null);
 
-  // Update the ref whenever state.messages changes
-  useEffect(() => {
-    latestMessagesRef.current = state.messages;
-  }, [state.messages]);
-
-  // --- Audio / Voice Logic ---
-
-  const toggleRecording = () => {
-    setState(prev => ({ ...prev, isRecording: !prev.isRecording }));
-  };
-
-  const togglePauseAudio = () => {
-    // Repurposed for Typewriter Pause
-    setState(prev => ({ ...prev, isAudioPaused: !prev.isAudioPaused }));
-  };
-
-  const stopAudio = () => {
-    setState(prev => ({ 
-      ...prev, 
-      isAudioPlaying: false, 
-      isAudioPaused: false, 
-      currentlyPlayingMessageId: null 
-    }));
-  };
-
-  // --- Persistence Logic ---
-  
-  useEffect(() => {
+  // Helper for safe localStorage saving
+  const safeSaveToLocalStorage = (key: string, data: any) => {
     try {
-      const savedNotebook = localStorage.getItem('uttar_ai_notebook');
-      if (savedNotebook) {
-        setState(prev => ({ ...prev, notebook: JSON.parse(savedNotebook) }));
-      }
-      handleNewNote(); 
+      localStorage.setItem(key, JSON.stringify(data));
     } catch (e) {
-      console.error("Failed to load notebook", e);
+      if (e instanceof Error && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED')) {
+        console.warn(`LocalStorage quota exceeded for key: ${key}. Attempting to prune...`);
+        
+        if (key.startsWith('saraswati_chat_') && Array.isArray(data)) {
+          // Prune images first
+          const prunedMessages = data.map((msg: any) => {
+            if (msg.image) {
+              const { image, ...rest } = msg;
+              return rest;
+            }
+            return msg;
+          });
+          
+          try {
+            localStorage.setItem(key, JSON.stringify(prunedMessages));
+            return;
+          } catch (e2) {
+            // Still failing? Keep only last 15 messages
+            const limitedMessages = prunedMessages.slice(-15);
+            try {
+              localStorage.setItem(key, JSON.stringify(limitedMessages));
+              return;
+            } catch (e3) {
+              console.error("Failed to save even after pruning and limiting messages", e3);
+            }
+          }
+        }
+        
+        if (key === 'saraswati_history' && Array.isArray(data)) {
+           // Keep only 15 most recent sessions in history
+           const limitedHistory = data.slice(0, 15);
+           try {
+             localStorage.setItem(key, JSON.stringify(limitedHistory));
+             return;
+           } catch (e4) {
+             console.error("Failed to save history even after limiting", e4);
+           }
+        }
+      } else {
+        console.error("LocalStorage error", e);
+      }
+    }
+  };
+
+  // Check for API Key on mount & Load History
+  useEffect(() => {
+    const checkApiKey = async () => {
+      if (window.aistudio) {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+          setShowKeySelector(true);
+        }
+      }
+    };
+    checkApiKey();
+
+    // Load History from LocalStorage
+    const savedHistory = localStorage.getItem('saraswati_history');
+    if (savedHistory) {
+        try {
+            setHistory(JSON.parse(savedHistory));
+        } catch (e) {
+            console.error("Failed to parse history", e);
+        }
     }
   }, []);
 
+  // Save Messages to LocalStorage whenever they change
   useEffect(() => {
-    if (!currentSessionId || state.messages.length === 0) return;
-
-    const sessionKey = `uttar_ai_session_${currentSessionId}`;
-    localStorage.setItem(sessionKey, JSON.stringify(state.messages));
-
-    const title = state.messages[0].content.slice(0, 30) + (state.messages[0].content.length > 30 ? '...' : '');
-    const date = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-
-    setState(prev => {
-      const existingEntryIndex = prev.notebook.findIndex(n => n.id === currentSessionId);
-      let updatedNotebook;
-      if (existingEntryIndex >= 0) {
-        updatedNotebook = [...prev.notebook];
-        updatedNotebook[existingEntryIndex] = { ...updatedNotebook[existingEntryIndex], title, summary: title };
-      } else {
-        // This path should ideally not be taken if currentSessionId exists and has messages,
-        // but ensures the notebook entry is created if somehow missing.
-        updatedNotebook = [{ id: currentSessionId, title, date, summary: title }, ...prev.notebook];
-      }
-      localStorage.setItem('uttar_ai_notebook', JSON.stringify(updatedNotebook));
-      return { ...prev, notebook: updatedNotebook };
-    });
-  }, [state.messages, currentSessionId]);
-
-  const handleNewNote = () => {
-    // Synchronously save the *current* session's messages before changing currentSessionId
-    if (currentSessionId && latestMessagesRef.current && latestMessagesRef.current.length > 0) {
-      const sessionKey = `uttar_ai_session_${currentSessionId}`;
-      localStorage.setItem(sessionKey, JSON.stringify(latestMessagesRef.current)); // Use ref for latest messages
-
-      // Update notebook entry title/summary for the session being closed
-      const title = latestMessagesRef.current[0].content.slice(0, 30) + (latestMessagesRef.current[0].content.length > 30 ? '...' : '');
-      const date = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-
-      setState(prev => {
-        const existingEntryIndex = prev.notebook.findIndex(n => n.id === currentSessionId);
-        let updatedNotebook;
-        if (existingEntryIndex >= 0) {
-          updatedNotebook = [...prev.notebook];
-          updatedNotebook[existingEntryIndex] = { ...updatedNotebook[existingEntryIndex], title, date, summary: title };
-        } else {
-          // This path should ideally not be taken if currentSessionId exists and has messages,
-          // but ensures the notebook entry is created if somehow missing.
-          updatedNotebook = [{ id: currentSessionId, title, date, summary: title }, ...prev.notebook];
-        }
-        localStorage.setItem('uttar_ai_notebook', JSON.stringify(updatedNotebook));
-        return { ...prev, notebook: updatedNotebook };
-      });
+    if (currentSessionId && messages.length > 0) {
+        safeSaveToLocalStorage(`saraswati_chat_${currentSessionId}`, messages);
     }
+  }, [messages, currentSessionId]);
 
-    const newId = generateId();
-    setCurrentSessionId(newId);
-    trackSessionStart(newId);
-    setState(prev => ({
-      ...prev,
-      messages: [], // Clear messages for the new session
-      isThinking: false,
-      isRecording: false,
-      estimatedWaitTime: undefined
-    }));
-    setSidebarOpen(false);
-  };
-
-  const loadSession = (sessionId: string) => {
-    if (sessionId === currentSessionId) {
-      setSidebarOpen(false); // Already on this session, just close sidebar
-      return;
-    }
-
-    // Synchronously save the *current* session's messages before loading a new one
-    if (currentSessionId && latestMessagesRef.current && latestMessagesRef.current.length > 0) {
-      const sessionKey = `uttar_ai_session_${currentSessionId}`;
-      localStorage.setItem(sessionKey, JSON.stringify(latestMessagesRef.current)); // Use ref for latest messages
-
-      // Update notebook entry title/summary for the session being closed
-      const title = latestMessagesRef.current[0].content.slice(0, 30) + (latestMessagesRef.current[0].content.length > 30 ? '...' : '');
-      const date = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-      setState(prev => {
-        const existingEntryIndex = prev.notebook.findIndex(n => n.id === currentSessionId);
-        let updatedNotebook;
-        if (existingEntryIndex >= 0) {
-          updatedNotebook = [...prev.notebook];
-          updatedNotebook[existingEntryIndex] = { ...updatedNotebook[existingEntryIndex], title, date, summary: title };
-        } else {
-          // This path should ideally not be taken if currentSessionId exists and has messages
-          updatedNotebook = [{ id: currentSessionId, title, date, summary: title }, ...prev.notebook];
-        }
-        localStorage.setItem('uttar_ai_notebook', JSON.stringify(updatedNotebook));
-        return { ...prev, notebook: updatedNotebook };
-      });
-    }
-
-    try {
-      const sessionData = localStorage.getItem(`uttar_ai_session_${sessionId}`);
-      if (sessionData) {
-        setCurrentSessionId(sessionId);
-        setState(prev => ({
-          ...prev,
-          messages: JSON.parse(sessionData),
-          isThinking: false,
-          isAudioPlaying: false,
-          currentlyPlayingMessageId: null
-        }));
-        setSidebarOpen(false);
-      } else {
-        console.warn(`Session data not found for ID: ${sessionId}, starting new empty session.`);
-        // If data is not found, it implies a new session will be effectively loaded,
-        // so ensure the currentSessionId is set, and messages are cleared.
-        setCurrentSessionId(sessionId); // Set to the requested ID, even if empty
-        setState(prev => ({
-          ...prev,
-          messages: [],
-          isThinking: false,
-          isAudioPlaying: false,
-          currentlyPlayingMessageId: null
-        }));
-        setSidebarOpen(false);
-      }
-    } catch (e) {
-      console.error("Failed to load session", e);
-      // Fallback: If loading fails, just clear to an empty new session
-      handleNewNote(); // This will create a completely fresh session.
-    }
-  };
-
-  const fileToDataURL = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = error => reject(error);
-    });
-  };
-
-  const handleSendMessage = async (text: string, image?: File) => {
-    // --- ROBUST DEDUPLICATION CHECK ---
-    const now = Date.now();
-    if (lastProcessedMessageRef.current && 
-        lastProcessedMessageRef.current.content === text && 
-        (now - lastProcessedMessageRef.current.timestamp < 2000)) {
-        console.warn("Duplicate message blocked by Ref check:", text);
-        return;
-    }
-    lastProcessedMessageRef.current = { content: text, timestamp: now };
-    // ----------------------------------
-
-    const currentRequestId = generateId();
-
-    let imageDataUrl: string | undefined = undefined;
-    if (image) {
-      try { imageDataUrl = await fileToDataURL(image); } catch (e) { }
-    }
-
-    // Track prompt
-    const lastMsg = state.messages[state.messages.length - 1];
-    const mcqOpts = lastMsg?.mcqOptions || [];
-    if (!isMCQResponse(text, mcqOpts) && state.sessionId) trackStudentPrompt(text, state.sessionId, false);
-
-    const newMessage: Message = {
-      id: currentRequestId,
-      role: Role.USER,
-      type: imageDataUrl ? MessageType.IMAGE : MessageType.TEXT,
-      content: text,
-      timestamp: Date.now(),
-      imageData: imageDataUrl
-    };
-
-    const estimatedTime = getEstimatedWaitTime('math', text);
-
-    setState(prev => ({
-      ...prev,
-      messages: [...prev.messages, newMessage],
-      isThinking: true,
-      estimatedWaitTime: estimatedTime
-    }));
-
-    try {
-      // FIX: Use 'state.messages' (history BEFORE the new message) 
-      // AND handle image-only messages where 'content' might be empty string.
-      const history = state.messages.map(m => {
-        // Fallback text if content is empty (e.g. image message) to prevent API errors
-        const safeContent = m.content && m.content.trim().length > 0 
-            ? m.content 
-            : (m.imageData ? "[User sent an image]" : "...");
-        
-        return {
-          role: m.role,
-          parts: [{ text: safeContent }] 
-        };
-      });
-
-      let imagePart;
-      if (image && imageDataUrl) {
-        const base64Data = imageDataUrl.split(',')[1];
-        imagePart = { inlineData: { mimeType: image.type, data: base64Data } };
-      }
-
-      // Call Gemini
-      const { text: aiResponseText, groundingChunks } = await generateMathResponse(history, text, imagePart);
-      
-      let finalContent = aiResponseText;
-      let mcqOptions: string[] | undefined;
-
-      // 1. ROBUST MCQ TAG PARSING
-      // Use Regex to find the START to handle spaces like "<< MCQ:" or "<<MCQ :"
-      // Use lastIndexOf for the END to handle nested brackets/content safely
-      const startMatch = finalContent.match(/<<\s*MCQ\s*:/i);
-      const startIdx = startMatch ? startMatch.index : -1;
-      const mcqEndTag = '>>';
-
-      if (startIdx !== -1 && startMatch) {
-          // Find the last occurrence of '>>' to capture the entire block
-          const endIdx = finalContent.lastIndexOf(mcqEndTag);
+  // Save History list to LocalStorage whenever it changes
+  useEffect(() => {
+      if (history.length > 0) {
+          safeSaveToLocalStorage('saraswati_history', history);
           
-          if (endIdx > startIdx) {
-              const rawJson = finalContent.substring(startIdx + startMatch[0].length, endIdx).trim();
-              const fullTagString = finalContent.substring(startIdx, endIdx + mcqEndTag.length);
-              
-              // IMMEDIATELY remove the tag from content so it is NOT visible in UI
-              finalContent = finalContent.replace(fullTagString, '').trim();
-
-              try {
-                  // Attempt Parse
-                  mcqOptions = JSON.parse(rawJson);
-                  
-                   // Malformed LaTeX check
-                  if (mcqOptions && Array.isArray(mcqOptions) && mcqOptions.some((o: string) => /[\u000C\t]/.test(o))) {
-                      throw new Error("Malformated LaTeX escapes detected");
-                  }
-              } catch (e) {
-                  console.warn("MCQ JSON parse failed, attempting sanitization...", e);
-                  try {
-                      // Sanitization Fallback
-                      const sanitized = rawJson
-                        .replace(/\\"/g, '___QUOTE___') 
-                        .replace(/\\/g, '\\\\') 
-                        .replace(/___QUOTE___/g, '\\"');
-                      mcqOptions = JSON.parse(sanitized);
-                  } catch (e2) {
-                      console.error("MCQ Sanitization failed completely", e2);
+          // Cleanup orphaned chat data to free up space
+          const historyIds = new Set(history.map(h => h.id));
+          const keysToRemove: string[] = [];
+          
+          for (let i = 0; i < localStorage.length; i++) {
+              const key = localStorage.key(i);
+              if (key && key.startsWith('saraswati_chat_')) {
+                  const id = key.replace('saraswati_chat_', '');
+                  if (!historyIds.has(id)) {
+                      keysToRemove.push(key);
                   }
               }
           }
+          
+          keysToRemove.forEach(key => localStorage.removeItem(key));
       }
+  }, [history]);
 
-      const responseMessageId = generateId();
-      
-      const responseMessage: Message = {
-        id: responseMessageId,
-        role: Role.MODEL,
-        type: MessageType.TEXT,
-        content: finalContent,
-        groundingChunks: groundingChunks,
-        mcqOptions: mcqOptions,
-        timestamp: Date.now()
-      };
-
-      setState(prev => ({
-        ...prev,
-        messages: [...prev.messages, responseMessage],
-        isThinking: false,
-        estimatedWaitTime: undefined,
-        isAudioPlaying: true, // Start "playing" (typing)
-        currentlyPlayingMessageId: responseMessageId
-      }));
-
-    } catch (error: any) {
-       console.error("Generation Error:", error);
-       lastProcessedMessageRef.current = null;
-       const isNetwork = error?.message?.includes('fetch') || error?.message?.includes('network') || error?.message?.includes('Failed to fetch') || error?.code === 'ERR_NETWORK';
-       const errorMsg = isNetwork
-         ? "⚠️ Connection lost. Please check your internet and try again."
-         : "⚠️ Saraswati couldn't respond. Please try again in a moment.";
-       const errMessage = {
-         id: generateId(),
-         role: 'model' as any,
-         type: 'text' as any,
-         content: errorMsg,
-         timestamp: Date.now(),
-       };
-       setState(prev => ({
-         ...prev,
-         isThinking: false,
-         estimatedWaitTime: undefined,
-         messages: [...prev.messages, errMessage],
-       }));
+  const handleSelectKey = async () => {
+    if (window.aistudio) {
+      await window.aistudio.openSelectKey();
+      setShowKeySelector(false);
     }
   };
 
+  const handleLoadSession = (sessionId: string) => {
+      const savedChat = localStorage.getItem(`saraswati_chat_${sessionId}`);
+      if (savedChat) {
+          try {
+              const loadedMessages = JSON.parse(savedChat);
+              setMessages(loadedMessages);
+              setCurrentSessionId(sessionId);
+              setActiveMcqMessageId(null);
+              setIsPaused(false);
+              setIsTypingComplete(true);
+              
+              // Mobile UX: Close sidebar on selection
+              setIsSidebarOpen(false);
+          } catch (e) {
+              console.error("Failed to load chat", e);
+          }
+      }
+  };
+
+  const handleNewTopic = () => {
+      setMessages([]);
+      setActiveMcqMessageId(null);
+      setIsPaused(false);
+      setIsTypingComplete(true);
+      setCurrentSessionId(Date.now().toString());
+  };
+
+  const handleSendMessage = async (text: string, image?: string) => {
+    if (!text.trim() && !image) return;
+
+    setActiveMcqMessageId(null); 
+    setIsPaused(false); 
+
+    // Save to History if this is the start of a new conversation
+    if (messages.length === 0) {
+        const newHistoryItem: HistoryItem = {
+            id: currentSessionId,
+            title: text.length > 25 ? text.substring(0, 25) + '...' : text,
+            date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+        };
+        setHistory(prev => [newHistoryItem, ...prev]);
+        // History saving is handled by useEffect
+    }
+
+    const newUserMsg: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      text: text,
+      image: image,
+      timestamp: Date.now()
+    };
+
+    setMessages(prev => [...prev, newUserMsg]);
+    setIsLoading(true);
+    setIsTypingComplete(false);
+
+    try {
+      const response = await SaraswatiService.sendMessage(text, messages, image);
+      
+      const newAiMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'model',
+        text: response.text, 
+        rawText: response.rawText, 
+        groundingMetadata: response.groundingMetadata,
+        mcq: response.mcq,
+        timestamp: Date.now()
+      };
+
+      setIsLoading(false);
+      
+      setMessages(prev => {
+          const updatedMessages = [...prev, newAiMsg];
+          if (newAiMsg.mcq) {
+              setActiveMcqMessageId(newAiMsg.id);
+          }
+          return updatedMessages;
+      });
+
+    } catch (error) {
+      console.error("Error:", error);
+      setIsLoading(false);
+      setIsTypingComplete(true);
+      setActiveMcqMessageId(null); 
+      
+      const errorMsgId = Date.now().toString();
+      const errorText = "I apologize, there was a technical glitch. Please try again.";
+      setMessages(prev => [...prev, {
+        id: errorMsgId,
+        role: 'model',
+        text: errorText,
+        timestamp: Date.now()
+      }]);
+    }
+  };
+
+  const handleSelectMcqOption = async (messageId: string, optionLabel: string) => {
+      setMessages(prevMessages => {
+          return prevMessages.map(msg => {
+              if (msg.id === messageId && msg.mcq) {
+                  return { ...msg, mcq: { ...msg.mcq, selectedOption: optionLabel } };
+              }
+              return msg;
+          });
+      });
+
+      const systemReplyText = `My selection is option ${optionLabel}.`;
+      
+      setIsLoading(true); 
+      setIsPaused(false);
+      setIsTypingComplete(false);
+      setActiveMcqMessageId(null); 
+
+      try {
+          const response = await SaraswatiService.sendMessage(systemReplyText, messages);
+          
+          const newAiMsg: Message = {
+            id: (Date.now() + 1).toString(),
+            role: 'model',
+            text: response.text, 
+            rawText: response.rawText, 
+            groundingMetadata: response.groundingMetadata,
+            mcq: response.mcq, 
+            timestamp: Date.now()
+          };
+
+          setIsLoading(false);
+          
+          setMessages(prev => {
+              const updatedMessages = [...prev, newAiMsg];
+              if (newAiMsg.mcq) {
+                  setActiveMcqMessageId(newAiMsg.id);
+              }
+              return updatedMessages;
+          });
+
+      } catch (error) {
+          console.error("Error post-MCQ response:", error);
+          setIsLoading(false);
+          setIsTypingComplete(true);
+          setActiveMcqMessageId(null); 
+          
+          const errorMsgId = Date.now().toString();
+          const errorText = "I apologize, there was a technical glitch. Please try again.";
+          setMessages(prev => [...prev, {
+            id: errorMsgId,
+            role: 'model',
+            text: errorText,
+            timestamp: Date.now()
+          }]);
+      }
+  };
+
+  if (showKeySelector) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-[#000000] text-white p-6 text-center">
+        <h1 className="text-3xl font-bold mb-4 text-yellow-500">Setup Required</h1>
+        <p className="mb-8 text-stone-300 max-w-md">
+          To use the advanced teaching models (Gemini 3 Flash) and image generation, you must select a paid API key from a billing-enabled Google Cloud project.
+        </p>
+        <button 
+          onClick={handleSelectKey}
+          className="px-8 py-3 bg-stone-800 border border-stone-600 hover:border-yellow-500 hover:text-yellow-500 rounded-full font-bold shadow-lg transition transform hover:scale-105"
+        >
+          Select API Key
+        </button>
+        <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noreferrer" className="mt-8 text-sm text-stone-500 hover:text-stone-300 underline">
+          Read about Billing Requirements
+        </a>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex h-screen bg-[#1a1a1a] relative text-stone-300 font-sans overflow-hidden">
+    <div className="flex flex-col h-screen overflow-hidden bg-black text-stone-300 relative">
+      
+      <Header 
+        onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+        onNewTopic={handleNewTopic} onSwitchMode={onSwitchMode} 
+      onSwitchMode={onSwitchMode} />
+      
       <Sidebar 
         isOpen={isSidebarOpen} 
-        notebook={state.notebook} 
-        currentSessionId={currentSessionId}
-        onSelectEntry={loadSession} 
-        onNewSession={handleNewNote}
+        onClose={() => setIsSidebarOpen(false)}
+        history={history} 
+        onLoadSession={handleLoadSession}
       />
-      <div className={`flex-1 flex flex-col h-full transition-all duration-300 ${isSidebarOpen ? 'ml-64' : 'ml-0'}`}>
-        <header className="h-16 border-b border-stone-800 flex items-center justify-between px-4 bg-[#1a1a1a]/90 backdrop-blur-md z-20">
-          <div className="flex items-center space-x-4">
-            <button onClick={() => setSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-stone-800 rounded-lg">
-              <Menu className="w-6 h-6 text-stone-400" />
-            </button>
-            <div className="flex items-center">
-              <div className="w-9 h-9 rounded-full bg-yellow-500 flex items-center justify-center text-stone-900 font-bold text-xl font-['Arial'] mr-2 relative shadow-md shadow-yellow-500/10">
-                <span className="-mt-0.5">स</span>
-              </div>
-              <div className="flex items-center h-10">
-                <span className="text-2xl font-bold text-stone-200 font-['Arial'] mt-1">Saraswati</span>
-              </div>
-            </div>
-          </div>
-          <div className="flex items-center space-x-3">
-             <button 
-               onClick={handleNewNote}
-               className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-full text-white transition-colors border border-indigo-700 shadow-lg"
-             >
-               <PlusCircle className="w-4 h-4" />
-               <span className="text-sm font-medium">New Note</span>
-             </button>
-          </div>
-        </header>
 
-        <ChatInterface 
-          messages={state.messages} 
-          isThinking={state.isThinking}
-          isAudioPaused={state.isAudioPaused}
-          currentlyPlayingMessageId={state.currentlyPlayingMessageId}
-          estimatedWaitTime={state.estimatedWaitTime}
-          onSendMessage={(text) => handleSendMessage(text)}
-          onTypingComplete={stopAudio}
-        />
+      {/* Main Content Area */}
+      <main className="flex-1 flex overflow-hidden relative">
+          
+          {/* Left / Main Column: Chat */}
+          <div className="flex-1 flex flex-col relative w-full lg:w-auto min-w-0">
+            <ErrorBoundary>
+                <BlackboardQuick 
+                    messages={messages} 
+                    isLoading={isLoading} 
+                    isPaused={isPaused}
+                    onTogglePlayback={() => setIsPaused(!isPaused)}
+                    onTypingComplete={() => setIsTypingComplete(true)}
+                    activeMcqMessageId={activeMcqMessageId} 
+                    onSelectMcqOption={handleSelectMcqOption} 
+                />
+            </ErrorBoundary>
+            
+            <InputBar 
+                onSend={handleSendMessage} 
+                disabled={(isLoading || !!activeMcqMessageId) && !isPaused} 
+                isPaused={isPaused}
+                onTogglePlayback={() => setIsPaused(!isPaused)}
+                isPlaying={(!isLoading && !isTypingComplete) || !!activeMcqMessageId}
+            />
+          </div>
 
-        <div className="p-4 pb-6">
-          <InputArea 
-            onSendMessage={handleSendMessage} 
-            isRecording={state.isRecording}
-            toggleRecording={toggleRecording}
-            isAudioPlaying={state.isAudioPlaying}
-            isAudioPaused={state.isAudioPaused}
-            onTogglePause={togglePauseAudio}
-          />
-        </div>
-      </div>
-      {isSidebarOpen && (
-        <div className="fixed inset-0 bg-black/50 z-10 md:hidden" onClick={() => setSidebarOpen(false)} />
-      )}
+      </main>
     </div>
   );
 };
 
-export default AppQuick;
+export default App;

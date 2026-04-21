@@ -1,9 +1,10 @@
 {
-  "name": "Lakshmi (Indian IB Math Tutor)",
-  "description": "A personalized AI math tutor for IB students. Integrates the IB Learner Profile and ATL skills with a warm Indian teaching persona, real-time voice interaction, and Gemini 3.0 reasoning.",
+  "name": "Saraswati hindi CBSE ",
+  "description": "An expert CBSE Science teacher (Physics, Chemistry, Biology) who uses IB Learner Profile and ATL skills to inspire students through hinglish dialogue.",
   "requestFramePermissions": [
     "camera",
     "microphone",
     "geolocation"
-  ]
+  ],
+  "majorCapabilities": []
 }
