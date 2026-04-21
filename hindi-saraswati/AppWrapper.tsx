@@ -5,7 +5,7 @@ import ModeSelect, { AppMode } from './components/ModeSelect';
 import App from './App';
 import AppQuick from './AppQuick';
 
-type Stage = 'checking' | 'need-auth' | 'select-mode' | 'app';
+type Stage = 'checking'|'need-auth'|'select-mode'|'app';
 const Y = '#F5B800'; const B = '#0A0A0A';
 
 function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
@@ -77,6 +77,20 @@ export default function AppWrapper() {
   const handleLogout = async()=>{await signOut(auth);setStage('need-auth');setAppMode(null);};
   if(stage==='checking') return <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:B}}><div style={{width:40,height:40,border:'3px solid #F5B800',borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style></div>;
   if(stage==='need-auth') return <AuthScreen onAuthenticated={()=>setStage('select-mode')}/>;
-  if(stage==='select-mode') return <div style={{position:'relative'}}><div style={{position:'fixed',top:16,right:16,zIndex:9999}}><button onClick={handleLogout} style={{background:'rgba(26,26,26,0.9)',border:'1px solid #3A3A3A',borderRadius:20,padding:'0.4rem 1.2rem',color:'#888',fontSize:'0.72rem',cursor:'pointer',backdropFilter:'blur(8px)'}}>Sign Out</button></div><ModeSelect onSelect={m=>{setAppMode(m);setStage('app');}}/></div>;
-  return <>{appMode==='quicksolve'?<AppQuick/>:<App/>}</>;
+  if(stage==='select-mode') return (
+    <div style={{position:'relative'}}>
+      <div style={{position:'fixed',top:16,right:16,zIndex:9999}}>
+        <button onClick={handleLogout} style={{background:'rgba(26,26,26,0.9)',border:'1px solid #3A3A3A',borderRadius:20,padding:'0.4rem 1.2rem',color:'#888',fontSize:'0.72rem',cursor:'pointer',backdropFilter:'blur(8px)'}}>Sign Out</button>
+      </div>
+      <ModeSelect onSelect={m=>{setAppMode(m);setStage('app');}}/>
+    </div>
+  );
+  return (
+    <>
+      <div style={{position:'fixed',top:12,right:16,zIndex:9999}}>
+        <button onClick={()=>setStage('select-mode')} style={{background:'rgba(26,26,26,0.9)',border:'1px solid #3A3A3A',borderRadius:20,padding:'0.4rem 1.2rem',color:'#888',fontSize:'0.72rem',cursor:'pointer',fontFamily:"'Segoe UI',system-ui,sans-serif",backdropFilter:'blur(8px)'}}>⇄ Switch Mode</button>
+      </div>
+      {appMode==='quicksolve'?<AppQuick/>:<App/>}
+    </>
+  );
 }
