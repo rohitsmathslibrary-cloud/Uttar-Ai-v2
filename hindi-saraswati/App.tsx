@@ -10,7 +10,7 @@ import { SaraswatiService } from './services/geminiServiceWeb';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import 'katex/dist/katex.min.css';
 
-const App: React.FC = () => {
+const App: React.FC<{onSwitchMode?: () => void}> = ({ onSwitchMode }) => {
   const [mode, setMode] = useState<UserMode>('text');
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -503,7 +503,7 @@ const App: React.FC = () => {
       
       <Header 
         mode={mode} 
-        onToggleLive={() => setMode(mode === 'text' ? 'live' : 'text')} 
+        onToggleLive={() => setMode(mode === 'text' ? 'live' : 'text')} onSwitchMode={onSwitchMode} 
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
         onNewTopic={handleNewTopic} 
       />
