@@ -32,3 +32,14 @@
 .animate-bounce-deep {
   animation: bounce-deep 1s infinite;
 }
+
+
+/* Mobile scroll fix */
+* {
+  -webkit-overflow-scrolling: touch;
+}
+
+.overflow-y-auto {
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
