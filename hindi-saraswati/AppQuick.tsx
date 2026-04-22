@@ -307,7 +307,7 @@ const App: React.FC<{onSwitchMode?: () => void}> = ({ onSwitchMode }) => {
   }
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-black text-stone-300 relative">
+    <div className="flex flex-col h-screen bg-black text-stone-300 relative">
       
       <Header 
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
