@@ -419,7 +419,7 @@ export const Blackboard: React.FC<BlackboardProps> = ({ messages, isLoading, pla
   }
 
   return (
-    <div className="flex-1 overflow-y-auto w-full relative pb-40 pt-36">
+    <div className="flex-1 overflow-y-auto w-full relative pb-40 pt-36 overscroll-contain [&::-webkit-scrollbar]:hidden">
        <div className="max-w-5xl mx-auto px-4 relative z-10">
            <div className="pl-0 md:pl-4">
                {messages.map((msg) => (
